@@ -1,0 +1,433 @@
+import os
+import csv
+import time
+import requests
+import re
+import schedule
+import json
+import pandas as pd
+from openpyxl import load_workbook, Workbook
+from urllib.parse import unquote
+from datetime import datetime, timedelta
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+class IDXDownloader:
+    def __init__(self, download_folder="IDX_Downloads"):
+        self.url = "https://www.idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi/"
+        self.download_folder = download_folder
+        self.output_excel = "idx_metadata.xlsx"
+        self.config_file = "config.json"
+        self.driver = None
+        
+        # Load config
+        self.config = self.load_config()
+        
+        # Determine the date limit (7 days ago from today)
+        self.cutoff_date = datetime.now() - timedelta(days=7)
+        self.cutoff_date = self.cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Create download folder
+        if not os.path.exists(self.download_folder):
+            os.makedirs(self.download_folder)
+            
+        # Load previously downloaded URLs to avoid duplicates
+        self.downloaded_urls = self.load_tracker()
+
+    def load_config(self):
+        """Load exclusion and priority keywords from config.json"""
+        if os.path.exists(self.config_file):
+            with open(self.config_file, "r") as f:
+                return json.load(f)
+        return {"exclude_keywords": [], "high_priority_keywords": []}
+
+    def load_tracker(self):
+        """Load already downloaded URLs from the Excel tracker"""
+        downloaded = set()
+        if os.path.exists(self.output_excel):
+            try:
+                wb = load_workbook(self.output_excel, read_only=True)
+                ws = wb.active
+                # Assuming 'file link' is now the 5th column (E) due to Priority column
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if len(row) >= 5 and row[4]:
+                        downloaded.add(row[4])
+                wb.close()
+            except Exception as e:
+                print(f"Warning: Could not load tracker {self.output_excel}: {e}")
+        return downloaded
+
+    def append_to_tracker(self, data):
+        """Append a single record to the Excel file"""
+        file_exists = os.path.exists(self.output_excel)
+        try:
+            if file_exists:
+                wb = load_workbook(self.output_excel)
+                ws = wb.active
+            else:
+                wb = Workbook()
+                ws = wb.active
+                ws.append(["Date", "Ticker Code", "Priority", "file title", "file link"])
+                
+            ws.append([
+                data["Date"], 
+                data["Ticker Code"], 
+                data["Priority"], 
+                data["file title"], 
+                data["file link"]
+            ])
+            wb.save(self.output_excel)
+            wb.close()
+        except Exception as e:
+            print(f"Error saving to Excel tracker: {e}")
+            
+    def setup_driver(self):
+        try:
+            import undetected_chromedriver as uc
+            print("Using undetected_chromedriver to bypass Cloudflare...")
+            options = uc.ChromeOptions()
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--disable-popup-blocking")
+            
+            # Set download directory for the browser and disable images for speed
+            prefs = {
+                "download.default_directory": os.path.abspath(self.download_folder),
+                "download.prompt_for_download": False,
+                "download.directory_upgrade": True,
+                "plugins.always_open_pdf_externally": True,
+                "profile.managed_default_content_settings.images": 2 # Disable images
+            }
+            options.add_experimental_option("prefs", prefs)
+            
+            try:
+                # Try with version 145 since the user's Chrome is 145
+                self.driver = uc.Chrome(options=options, version_main=145)
+            except Exception as e:
+                print(f"Failed with version 145: {e}. Trying default...")
+                self.driver = uc.Chrome(options=options)
+            
+        except ImportError:
+            print("undetected_chromedriver not found. Falling back to standard Selenium...")
+            chrome_options = Options()
+            
+            # Cloudflare/Detection bypass settings
+            chrome_options.add_argument("--headless=new")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            
+            # Important stealth flags
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            
+            # User Agent
+            chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+            
+            # Set download directory for the browser
+            prefs = {
+                "download.default_directory": os.path.abspath(self.download_folder),
+                "download.prompt_for_download": False,
+                "download.directory_upgrade": True,
+                "plugins.always_open_pdf_externally": True
+            }
+            chrome_options.add_experimental_option("prefs", prefs)
+            
+            self.driver = webdriver.Chrome(options=chrome_options)
+            
+            # Execute script to remove navigator.webdriver property
+            self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": """
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    })
+                """
+            })
+        
+    def download_file(self, url, filename):
+        try:
+            filepath = os.path.join(self.download_folder, filename)
+            
+            # Use a session to share cookies and headers
+            session = requests.Session()
+            
+            # Transfer cookies from Selenium to requests
+            for cookie in self.driver.get_cookies():
+                session.cookies.set(cookie['name'], cookie['value'])
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Referer": "https://www.idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi/",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+                "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Upgrade-Insecure-Requests": "1"
+            }
+            
+            response = session.get(url, headers=headers, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return True
+        except Exception as e:
+            print(f"Error downloading {url}: {e}")
+            return False
+
+    def parse_date_string(self, date_str):
+        """Safely parse Indonesian datetime string to Python datetime object"""
+        date_str = date_str.strip()
+        if "Hari ini" in date_str or "Today" in date_str:
+            return datetime.now()
+            
+        id_months = {
+            'Januari': '01', 'Februari': '02', 'Maret': '03', 'April': '04',
+            'Mei': '05', 'Juni': '06', 'Juli': '07', 'Agustus': '08',
+            'September': '09', 'Oktober': '10', 'November': '11', 'Desember': '12'
+        }
+        for name, num in id_months.items():
+            if name in date_str:
+                date_str = date_str.replace(name, num)
+                break
+                
+        date_str = re.sub(r'\s+', ' ', date_str)
+        for fmt in ["%d %m %Y %H:%M:%S", "%d %m %Y %H:%M", "%d %m %Y", "%Y-%m-%d"]:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def go_to_page(self, page_num):
+        """Navigate to specific page using the input field"""
+        try:
+            page_input = self.driver.find_element(By.XPATH, "//input[@type='number'][@min][@max]")
+            page_input.click()
+            page_input.clear()
+            page_input.send_keys(str(page_num))
+            page_input.send_keys(Keys.RETURN)
+            print(f"Waiting for page {page_num} to load...")
+            time.sleep(4) # Polite delay for pagination to avoid rate limits
+            return True
+        except Exception as e:
+            print(f"Could not navigate to page {page_num}: {e}")
+            return False
+
+    def run_job(self):
+        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting IDX Downloader job...")
+        self.cutoff_date = datetime.now() - timedelta(days=7)
+        self.cutoff_date = self.cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Refresh config
+        self.config = self.load_config()
+        
+        total_downloaded = 0
+        try:
+            self.setup_driver()
+            print(f"Navigating to {self.url}...")
+            self.driver.get(self.url)
+            
+            print("Waiting for initial page content to load...")
+            time.sleep(5) 
+            
+            # --- Apply Saham Filter ---
+            try:
+                print("Applying 'Saham' filter...")
+                dropdown = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//div[@id='vs1__combobox']"))
+                )
+                dropdown.click()
+                time.sleep(1)
+                
+                saham_option = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//li[contains(@class, 'vs__dropdown-option') and normalize-space()='Saham']"))
+                )
+                saham_option.click()
+                print("Filter applied. Waiting for results to refresh...")
+                time.sleep(4)
+            except Exception as e:
+                print(f"Warning: Could not apply 'Saham' filter automatically: {e}")
+            
+            page_num = 1
+            stop_pagination = False
+            
+            while not stop_pagination:
+                print(f"\n{'='*40}\nProcessing Page {page_num}\n{'='*40}")
+                
+                if page_num > 1:
+                    if not self.go_to_page(page_num):
+                        break
+                
+                # Scroll to ensure elements render
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+                
+                records = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'disclosure-list__item')]")
+                if not records:
+                    records = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'disclosure-item')]")
+                
+                if not records:
+                    print("DEBUG: Specific record classes not found. Attempting tag-based extraction...")
+                    time_tags = self.driver.find_elements(By.TAG_NAME, "time")
+                    records = [t.find_element(By.XPATH, "./ancestor::div[contains(@class, 'mb-') or contains(@class, 'py-') or @class!=''][1]") for t in time_tags if t.is_displayed()]
+                    
+                if not records:
+                    print(f"DEBUG: No records found on page {page_num}. Page structure might have changed.")
+                    
+                    # Dump page source to a file so the user can inspect it and share it with us
+                    debug_file = f"debug_empty_page_{page_num}.html"
+                    with open(debug_file, "w", encoding="utf-8") as f:
+                        f.write(self.driver.page_source)
+                    print(f"DEBUG: Saved DOM source to {debug_file} for analysis.")
+                    
+                    break
+                
+                print(f"Found {len(records)} records on page {page_num}.")
+                
+                for idx, record in enumerate(records, 1):
+                    try:
+                        # 1. Date
+                        date_elem = record.find_elements(By.TAG_NAME, "time")
+                        date_text = date_elem[0].text.strip() if date_elem else "N/A"
+                        doc_date = self.parse_date_string(date_text)
+                        
+                        # Stop if we've reached documents older than 7 days
+                        if doc_date and doc_date < self.cutoff_date:
+                            print(f"\n[!] Reached document from {doc_date.strftime('%Y-%m-%d')} (> 7 days ago). Stopping completely.")
+                            stop_pagination = True
+                            break
+                        
+                        # 2. Ticker & Title
+                        title_elem = record.find_elements(By.TAG_NAME, "a")
+                        if not title_elem:
+                            continue
+                        
+                        main_link = title_elem[0]
+                        full_text = main_link.text.strip()
+                        
+                        ticker_match = re.search(r'\[\s*([A-Z0-9]{4,6})\s*\]', full_text)
+                        ticker = ticker_match.group(1) if ticker_match else "N/A"
+                        title = full_text.replace(f"[{ticker}]", "").strip() if ticker != "N/A" else full_text
+                        
+                        # --- Filtering and Priority Logic ---
+                        title_lower = title.lower()
+                        
+                        # Exclusion Check
+                        should_skip = False
+                        for kw in self.config["exclude_keywords"]:
+                            if kw.lower() in title_lower:
+                                print(f"  → Skipping excluded item: {title[:40]}...")
+                                should_skip = True
+                                break
+                        if should_skip: continue
+                        
+                        # Priority Check
+                        priority = "Normal"
+                        for kw in self.config["high_priority_keywords"]:
+                            if kw.lower() in title_lower:
+                                priority = "High"
+                                break
+                        
+                        # 3. Attachments
+                        attachment_links = record.find_elements(By.XPATH, ".//a[contains(@href, '.pdf') or contains(@href, '.zip') or contains(@href, '.xls') or contains(@href, 'download')]")
+                        
+                        for link in attachment_links:
+                            url = link.get_attribute("href")
+                            if not url: continue
+                            
+                            # SKIP if already downloaded
+                            if url in self.downloaded_urls:
+                                print(f"  → Skipped (already downloaded): [{ticker}] {title[:30]}...")
+                                continue
+                            
+                            # FORMAT: YYYYMMDD_Ticker_[HIGH]_Title.ext
+                            if doc_date:
+                                clean_date_ymd = doc_date.strftime('%Y%m%d')
+                            else:
+                                raw_nums = str(re.sub(r'[^\d]', '', str(date_text)))
+                                clean_date_ymd = raw_nums[:8]
+                                
+                            clean_ticker = ticker if ticker != "N/A" else "UNKNOWN"
+                            # Add HIGH to filename if priority
+                            priority_tag = "_HIGH" if priority == "High" else ""
+                            
+                            # Clean title for filename, take first 50 chars to avoid OS limits
+                            clean_title_raw = re.sub(r'[\\/*?:"<>|]', '_', title)
+                            clean_title = clean_title_raw[:50].strip()
+                            
+                            base_filename = unquote(url.split('/')[-1])
+                            ext = ".pdf"
+                            if "." in base_filename and "download" not in base_filename.lower():
+                                ext = "." + base_filename.split('.')[-1]
+                            elif ".zip" in url.lower(): ext = ".zip"
+                            elif ".xls" in url.lower(): ext = ".xlsx"
+                                
+                            filename = f"{clean_date_ymd}_{clean_ticker}{priority_tag}_{clean_title}{ext}"
+                            
+                            print(f"  → Downloading new file ({priority}): {filename}")
+                            
+                            if self.download_file(url, filename):
+                                print(f"    ✓ Success.")
+                                data_row = {
+                                    "Date": date_text,
+                                    "Ticker Code": ticker,
+                                    "Priority": priority,
+                                    "file title": title,
+                                    "file link": url
+                                }
+                                self.append_to_tracker(data_row)
+                                self.downloaded_urls.add(url)
+                                total_downloaded += 1
+                                print("    Polite delay (3s)...")
+                                time.sleep(3) # Increased delay to avoid triggering firewall
+                            else:
+                                print(f"    ✗ Failed.")
+                                time.sleep(1)
+                                
+                    except Exception as e:
+                        print(f"Error processing record {idx}: {e}")
+                        time.sleep(1)
+                        continue
+                
+                if not stop_pagination:
+                    page_num += 1
+
+            print(f"\n✓ Session complete. Downloaded {total_downloaded} new files.")
+
+        except Exception as e:
+            print(f"An error occurred during execution: {e}")
+        finally:
+            if self.driver:
+                print("Closing browser...")
+                self.driver.quit()
+
+    def run_scheduler(self):
+        print("Scheduler started. The script will run automatically every day at 08:00 AM.")
+        print("Press Ctrl+C to exit.")
+        
+        # Run once immediately on startup
+        self.run_job()
+            
+        # Schedule daily at 08:00
+        schedule.every().day.at("08:00").do(self.run_job)
+        
+        while True:
+            schedule.run_pending()
+            time.sleep(60)
+
+if __name__ == "__main__":
+    downloader = IDXDownloader()
+    # To run just once immediately, use downloader.run_job()
+    # To run continuously on a schedule, use downloader.run_scheduler()
+    downloader.run_scheduler()
