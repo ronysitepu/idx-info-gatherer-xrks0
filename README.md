@@ -1,148 +1,67 @@
-# IDX Automation Test - README
+# IDX Keterbukaan Informasi Downloader
 
-## Overview
-This automation test suite visits the IDX Keterbukaan Informasi (Information Disclosure) page and downloads documents based on their publication date.
+## 🚀 Overview
+This tool is a robust, stealthy Python script designed to automatically download attachment documents from the **IDX (Indonesia Stock Exchange)** Keterbukaan Informasi page. It features intelligent filtering, priority marking, and an automated daily schedule.
 
-## Features
-- Visits the IDX website page
-- Automatically downloads new documents
-- Tracks downloaded files to avoid duplicates
-- Saves all files to a dedicated folder
+## ✨ Key Features
+- **🛡️ Stealth Technology**: Uses `undetected-chromedriver` to bypass advanced anti-bot protections like Cloudflare.
+- **📊 "Saham" Filter**: Automatically applies the "Saham" (Stocks) filter to ensure you only get relevant equity data.
+- **⚙️ Programmable Config**: Easily filter out "trash" documents and mark priority items via `config.json`.
+- **📗 Excel Tracking**: Saves all metadata to `idx_metadata.xlsx` with a priority column. It intelligently skips files you've already downloaded.
+- **🏷️ Smart Naming**: Automatically renames files to `YYYYMMDD_Ticker_[HIGH]_Title.ext`.
+- **⏰ Daily Scheduler**: Automatically starts with a 7-day catch-up and then stays active to fetch new filings every day at **08:00 AM**.
 
-## System Requirements
+## 🛠️ Prerequisites
+- **Python 3.10+** (Recommend using [Anaconda/Conda](https://www.anaconda.com/))
+- **Google Chrome** installed on your system.
+- **Local environment**: The script is configured to work with Chrome version 145 (can be adjusted in code).
 
-- **Python**: 3.8 or higher
-- **Chrome/Chromium**: Latest version installed on your system
-- **Operating System**: Windows 10/11
+## 📥 Installation
 
-## Installation
+1. **Create and Activate Environment**:
+   ```bash
+   conda create -n vibe1 python=3.10
+   conda activate vibe1
+   ```
 
-### 1. Install Python 3.8+
+2. **Install Dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-- Download from https://www.python.org/downloads/
-- During installation, **check "Add Python to PATH"**
-- Verify installation:
+## ⚙️ Configuration (`config.json`)
+You can customize which files to ignore and which to highlight as high priority:
+
+```json
+{
+    "exclude_keywords": [
+        "laporan bulanan registrasi efek"
+    ],
+    "high_priority_keywords": [
+        "laporan keuangan",
+        "tender wajib",
+        "dividen",
+        "aksi korporasi"
+    ]
+}
+```
+
+## 🚀 Usage
+
+Simply run the script:
 ```bash
-python --version
+python idx_downloader.py
 ```
 
-### 2. Install Google Chrome
+- A Chrome window will open (visible mode). 
+- If a Cloudflare challenge appears, you can solve it once manually.
+- The script will navigate, filter for "Saham", and start processing the last 7 days of data.
+- Once done, it will enter **Schedule Mode** and wait until 08:00 AM the next day.
 
-- Download from https://www.google.com/chrome/
-- Run the installer and follow the prompts
+## 📂 Output
 
-### 3. Clone/Setup Project
+- **`IDX_Downloads/`**: Folder containing all downloaded PDF, ZIP, and XLS files.
+- **`idx_metadata.xlsx`**: Detailed Excel tracker with headers: `Date`, `Ticker Code`, `Priority`, `file title`, `file link`.
 
-Navigate to your project folder:
-```bash
-cd path\to\idx-info
-```
-
-### 4. Create Virtual Environment (Recommended)
-
-```bash
-python -m venv venv
-venv\Scripts\activate
-```
-
-### 5. Install Required Packages
-
-```bash
-pip install -r requirements.txt
-```
-
-The required packages are:
-- **selenium** (4.15.2): Browser automation framework
-- **webdriver-manager** (4.0.1): Automatic ChromeDriver management
-
-## Usage
-
-### Basic Usage
-
-```bash
-python automation_test.py
-```
-
-### Custom Configuration
-Edit `config.py` to customize:
-- **SELECTED_OPTIONS**: Choose which options to select (0-5)
-  - Example: `[0]` - select only first option
-  - Example: `[0, 1, 2]` - select first three options
-  - Example: `[0, 1, 2, 3, 4, 5]` - select all options
-
-- **DOWNLOAD_FOLDER**: Change the folder name for downloads
-
-### Programmatic Usage
-```python
-from automation_test import IDXAutomationTest
-
-# Create instance with custom settings
-automation = IDXAutomationTest(
-    download_folder="Keterbukaan Informasi IDX",
-    selected_options=[0, 1, 2, 3]  # Select specific options
-)
-
-# Run the automation
-automation.run()
-```
-
-## Output
-The script will:
-1. Create the download folder if it doesn't exist
-2. Open Chrome browser and navigate to the page
-3. Display publication dates of all documents
-4. Download only NEW files (tracks previously downloaded files)
-5. Display a summary of downloaded files
-
-## Tracking System
-
-The script uses a `.download_state.json` file to track downloaded documents:
-- **First run**: Downloads all documents from the first 5 pages
-- **Subsequent runs**: Only downloads NEW documents that haven't been seen before
-- **Automatic stopping**: Stops early if no new files found on first page
-
-## XPath Selectors Used
-- Time elements: `//time[@class='text-small']`
-- Download buttons: `//span[contains(@class, 'bzi-attachment')]/following-sibling::small`
-- Page input field: `//input[@type='number'][@min][@max]`
-
-## Troubleshooting
-
-### Chrome Driver Issues
-
-**Error: "chromedriver not found"**
-
-The `webdriver-manager` should handle this automatically, but if issues persist:
-
-- Download from https://chromedriver.chromium.org/
-- Place in the project directory or add the folder to your PATH
-
-### Downloads Not Saving
-- Ensure the script has write permissions in the current directory
-- Check that the DOWNLOAD_FOLDER path is valid
-- On Windows: Use forward slashes or double backslashes in paths
-
-### Elements Not Found
-- The website structure may have changed
-- Update the XPath selectors in `config.py` if needed
-- Use browser developer tools (F12) to inspect elements
-
-### Permission Issues
-
-- Right-click script → Properties → Uncheck "Read-only"
-
-### Virtual Environment Issues
-
-If `python` command doesn't work, try:
-```bash
-py automation_test.py
-```
-
-Or ensure Python is added to PATH and restart your terminal.
-
-## Notes
-- The script tracks downloaded files in `.download_state.json`
-- Chrome will remain open during execution (useful for monitoring)
-- The script automatically handles page navigation via input field
-- All files are saved to "Keterbukaan Informasi IDX" folder by default
-- PDF downloads are automatically saved instead of opened in the browser
+## 🛡️ Polite Crawling
+To prevent being blocked, the script implements a **3-second delay** between downloads and handles pagination conservatively.
