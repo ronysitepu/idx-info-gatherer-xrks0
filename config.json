@@ -4,11 +4,14 @@
     ],
     "high_priority_keywords": [
         "laporan keuangan",
-        "laporan tahunan",
         "tender wajib",
         "aksi korporasi",
         "public expose",
         "volatilitas",
         "dividen"
-    ]
+    ],
+    "initial_days": 7,
+    "duplicate_limit": 15,
+    "interval_minutes": 60,
+    "polite_delay_seconds": 3
 }

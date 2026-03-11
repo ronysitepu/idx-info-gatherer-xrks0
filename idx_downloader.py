@@ -27,9 +27,13 @@ class IDXDownloader:
         # Load config
         self.config = self.load_config()
         
-        # Determine the date limit (7 days ago from today)
-        self.cutoff_date = datetime.now() - timedelta(days=7)
+        # Determine the date limit from config (default 7 days)
+        initial_days = self.config.get("initial_days", 7)
+        self.cutoff_date = datetime.now() - timedelta(days=initial_days)
         self.cutoff_date = self.cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        self.duplicate_limit = self.config.get("duplicate_limit", 5)
+        self.polite_delay_seconds = self.config.get("polite_delay_seconds", 3)
         
         # Create download folder
         if not os.path.exists(self.download_folder):
@@ -226,13 +230,18 @@ class IDXDownloader:
 
     def run_job(self):
         print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting IDX Downloader job...")
-        self.cutoff_date = datetime.now() - timedelta(days=7)
-        self.cutoff_date = self.cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
         
         # Refresh config
         self.config = self.load_config()
+        initial_days = self.config.get("initial_days", 7)
+        self.duplicate_limit = self.config.get("duplicate_limit", 5)
+        self.polite_delay_seconds = self.config.get("polite_delay_seconds", 3)
+        
+        self.cutoff_date = datetime.now() - timedelta(days=initial_days)
+        self.cutoff_date = self.cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
         
         total_downloaded = 0
+        consecutive_duplicates = 0
         try:
             self.setup_driver()
             print(f"Navigating to {self.url}...")
@@ -241,23 +250,44 @@ class IDXDownloader:
             print("Waiting for initial page content to load...")
             time.sleep(5) 
             
-            # --- Apply Saham Filter ---
-            try:
-                print("Applying 'Saham' filter...")
-                dropdown = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//div[@id='vs1__combobox']"))
-                )
-                dropdown.click()
-                time.sleep(1)
-                
-                saham_option = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//li[contains(@class, 'vs__dropdown-option') and normalize-space()='Saham']"))
-                )
-                saham_option.click()
-                print("Filter applied. Waiting for results to refresh...")
-                time.sleep(4)
-            except Exception as e:
-                print(f"Warning: Could not apply 'Saham' filter automatically: {e}")
+            # --- Apply Saham Filter Robustly ---
+            def ensure_saham_filter():
+                try:
+                    # Check if already selected
+                    try:
+                        selected_elem = self.driver.find_element(By.CSS_SELECTOR, "#vs1__combobox .vs__selected")
+                        if "Saham" in selected_elem.text:
+                            print("Filter 'Saham' is already active.")
+                            return True
+                    except:
+                        pass
+
+                    print("Applying 'Saham' filter...")
+                    # Wait for combo box to be clickable
+                    dropdown = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, "//div[@id='vs1__combobox']"))
+                    )
+                    dropdown.click()
+                    time.sleep(1)
+                    
+                    saham_option = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, "//li[contains(@class, 'vs__dropdown-option') and normalize-space()='Saham']"))
+                    )
+                    saham_option.click()
+                    
+                    # Wait for selection to appear and loading to complete
+                    WebDriverWait(self.driver, 15).until(
+                        EC.text_to_be_present_in_element((By.CSS_SELECTOR, "#vs1__combobox .vs__selected"), "Saham")
+                    )
+                    print("Filter applied successfully.")
+                    time.sleep(4) # Allow page to refresh
+                    return True
+                except Exception as e:
+                    print(f"Warning: Attempt to apply 'Saham' filter failed: {e}")
+                    return False
+
+            if not ensure_saham_filter():
+                print("CRITICAL: Failed to apply 'Saham' filter. The script may download unintended files.")
             
             page_num = 1
             stop_pagination = False
@@ -268,6 +298,15 @@ class IDXDownloader:
                 if page_num > 1:
                     if not self.go_to_page(page_num):
                         break
+                    # Verify filter still active after navigation
+                    try:
+                        selected_elem = self.driver.find_element(By.CSS_SELECTOR, "#vs1__combobox .vs__selected")
+                        if "Saham" not in selected_elem.text:
+                            print(f"[!] Warning: Filter reset on page {page_num}! Re-applying...")
+                            if not ensure_saham_filter():
+                                print("[!] Re-application failed. Continuing with caution.")
+                    except:
+                        pass
                 
                 # Scroll to ensure elements render
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -349,7 +388,15 @@ class IDXDownloader:
                             # SKIP if already downloaded
                             if url in self.downloaded_urls:
                                 print(f"  → Skipped (already downloaded): [{ticker}] {title[:30]}...")
+                                consecutive_duplicates += 1
+                                if consecutive_duplicates >= self.duplicate_limit:
+                                    print(f"\n[!] Found {consecutive_duplicates} consecutive already-downloaded files. Catch-up complete? Stopping.")
+                                    stop_pagination = True
+                                    break
                                 continue
+                            
+                            # If we reached here, it's a new file, reset duplicate counter
+                            consecutive_duplicates = 0
                             
                             # FORMAT: YYYYMMDD_Ticker_[HIGH]_Title.ext
                             if doc_date:
@@ -389,8 +436,8 @@ class IDXDownloader:
                                 self.append_to_tracker(data_row)
                                 self.downloaded_urls.add(url)
                                 total_downloaded += 1
-                                print("    Polite delay (3s)...")
-                                time.sleep(3) # Increased delay to avoid triggering firewall
+                                print(f"    Polite delay ({self.polite_delay_seconds}s)...")
+                                time.sleep(self.polite_delay_seconds) # Configurable delay to avoid triggering firewall
                             else:
                                 print(f"    ✗ Failed.")
                                 time.sleep(1)
@@ -413,18 +460,35 @@ class IDXDownloader:
                 self.driver.quit()
 
     def run_scheduler(self):
-        print("Scheduler started. The script will run automatically every day at 08:00 AM.")
+        self.config = self.load_config() # Reload for latest settings
+        interval = self.config.get("interval_minutes", 60)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scheduler started. Interval: {interval} minutes.")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Polite delay: {self.polite_delay_seconds} seconds.")
         print("Press Ctrl+C to exit.")
         
         # Run once immediately on startup
         self.run_job()
             
-        # Schedule daily at 08:00
-        schedule.every().day.at("08:00").do(self.run_job)
+        # Schedule based on config
+        schedule.every(interval).minutes.do(self.run_job)
         
         while True:
-            schedule.run_pending()
-            time.sleep(60)
+            # Calculate next run time for display
+            next_run = datetime.now() + timedelta(minutes=interval)
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Job completed. Next run scheduled for: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            while True:
+                schedule.run_pending()
+                time.sleep(1)
+                # Add a Heartbeat every 10 seconds to terminal for visibility
+                if int(time.time()) % 10 == 0:
+                    print(".", end="", flush=True)
+                
+                # Check if the job just ran and reset to calculate the next interval
+                # This is a bit simplified; in a production script we'd check the schedule job object
+                # but for this specific flow, recalculating after a run is what's requested.
+                if not schedule.jobs or (schedule.next_run() and schedule.next_run() > next_run):
+                    break
 
 if __name__ == "__main__":
     downloader = IDXDownloader()

@@ -42,9 +42,14 @@ You can customize which files to ignore and which to highlight as high priority:
         "tender wajib",
         "dividen",
         "aksi korporasi"
-    ]
+    ],
+    "initial_days": 7,
+    "duplicate_limit": 5
 }
 ```
+
+- **`initial_days`**: How many days back the script should search for documents during the initial catch-up.
+- **`duplicate_limit`**: The number of consecutive already-downloaded files to find before stopping. This prevents scanning unnecessary pages once you are caught up.
 
 ## 🚀 Usage
 
