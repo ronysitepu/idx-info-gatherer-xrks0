@@ -2,6 +2,7 @@ import os
 import csv
 import time
 import requests
+import subprocess
 import re
 import schedule
 import json
@@ -17,15 +18,17 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 class IDXDownloader:
-    def __init__(self, download_folder="IDX_Downloads"):
+    def __init__(self, default_download_folder="IDX_Downloads"):
         self.url = "https://www.idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi/"
-        self.download_folder = download_folder
         self.output_excel = "idx_metadata.xlsx"
         self.config_file = "config.json"
         self.driver = None
         
         # Load config
         self.config = self.load_config()
+        
+        # Determine download folder: prioritize config.json, then fallback to default
+        self.download_folder = self.config.get("download_folder", default_download_folder)
         
         # Determine the date limit from config (default 7 days)
         initial_days = self.config.get("initial_days", 7)
@@ -103,7 +106,10 @@ class IDXDownloader:
                 "download.prompt_for_download": False,
                 "download.directory_upgrade": True,
                 "plugins.always_open_pdf_externally": True,
-                "profile.managed_default_content_settings.images": 2 # Disable images
+                "profile.managed_default_content_settings.images": 2, # Disable images
+                "profile.default_content_setting_values.automatic_downloads": 1, # Allow multiple downloads
+                "safebrowsing.enabled": False,
+                "safebrowsing.disable_download_protection": True
             }
             options.add_experimental_option("prefs", prefs)
             
@@ -138,7 +144,10 @@ class IDXDownloader:
                 "download.default_directory": os.path.abspath(self.download_folder),
                 "download.prompt_for_download": False,
                 "download.directory_upgrade": True,
-                "plugins.always_open_pdf_externally": True
+                "plugins.always_open_pdf_externally": True,
+                "profile.default_content_setting_values.automatic_downloads": 1, # Allow multiple downloads
+                "safebrowsing.enabled": False,
+                "safebrowsing.disable_download_protection": True
             }
             chrome_options.add_experimental_option("prefs", prefs)
             
@@ -157,37 +166,75 @@ class IDXDownloader:
         try:
             filepath = os.path.join(self.download_folder, filename)
             
-            # Use a session to share cookies and headers
-            session = requests.Session()
+            # Escape single quotes and backslashes for JS string
+            js_url = url.replace('\\', '\\\\').replace("'", "\\'")
+            js_filename = filename.replace('\\', '\\\\').replace("'", "\\'")
             
-            # Transfer cookies from Selenium to requests
-            for cookie in self.driver.get_cookies():
-                session.cookies.set(cookie['name'], cookie['value'])
+            # Execute JS to fetch the file and trigger download via blob
+            # This bypasses Cloudflare because it runs entirely inside the browser's context
+            js = f"""
+            var callback = arguments[arguments.length - 1];
+            fetch('{js_url}')
+                .then(response => {{
+                    if (!response.ok) throw new Error('status: ' + response.status);
+                    return response.blob();
+                }})
+                .then(blob => {{
+                    var windowUrl = window.URL || window.webkitURL;
+                    var blobUrl = windowUrl.createObjectURL(blob);
+                    var a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = '{js_filename}';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    windowUrl.revokeObjectURL(blobUrl);
+                    callback('success');
+                }})
+                .catch(error => callback(error.toString()));
+            """
             
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Referer": "https://www.idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi/",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
-                "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Upgrade-Insecure-Requests": "1"
-            }
+            # Set a timeout for the async script to allow large file downloads
+            self.driver.set_script_timeout(120)
+            result = self.driver.execute_async_script(js)
             
-            response = session.get(url, headers=headers, stream=True, timeout=30)
-            response.raise_for_status()
+            if result != 'success':
+                print(f"Error downloading {url} via JS: {result}")
+                return False
+                
+            # Wait for the file to be saved to disk
+            max_wait = 60
+            waited = 0
+            while waited < max_wait:
+                if os.path.exists(filepath):
+                    # Give it a short moment to ensure the file handles are released by the OS
+                    import time
+                    time.sleep(0.5)
+                    return True
+                import time
+                time.sleep(1)
+                waited += 1
+                
+            print(f"Error: Timeout waiting for {filename} to be saved to {self.download_folder}")
+            return False
             
-            with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            return True
         except Exception as e:
             print(f"Error downloading {url}: {e}")
             return False
+
+    def sync_to_rclone(self):
+        """Push all downloaded files to GDrive using rclone copy"""
+        target = self.config.get("rclone_target")
+        if not target:
+            return
+            
+        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Batch syncing to GDrive ({target})...")
+        try:
+            # Use rclone copy to push the entire folder
+            subprocess.run(["rclone", "copy", self.download_folder, target], check=True)
+            print(f"    ✓ Batch sync complete.")
+        except Exception as e:
+            print(f"    ✗ Batch sync failed: {e}")
 
     def parse_date_string(self, date_str):
         """Safely parse Indonesian datetime string to Python datetime object"""
@@ -451,6 +498,10 @@ class IDXDownloader:
                     page_num += 1
 
             print(f"\n✓ Session complete. Downloaded {total_downloaded} new files.")
+            
+            # Batch sync to GDrive
+            if total_downloaded > 0:
+                self.sync_to_rclone()
 
         except Exception as e:
             print(f"An error occurred during execution: {e}")
