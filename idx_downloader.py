@@ -488,6 +488,9 @@ class IDXDownloader:
                             else:
                                 print(f"    ✗ Failed.")
                                 time.sleep(1)
+                        
+                        if stop_pagination:
+                            break
                                 
                     except Exception as e:
                         print(f"Error processing record {idx}: {e}")
