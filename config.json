@@ -14,6 +14,6 @@
     "duplicate_limit": 5,
     "interval_minutes": 30,
     "polite_delay_seconds": 2,
-    "download_folder": "IDX_Downloads",
+    "download_folder": "IDX_Downloads/source",
     "rclone_target": "gdrive:Vibe/IDX_Downloads"
 }

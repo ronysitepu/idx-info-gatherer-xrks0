@@ -236,6 +236,51 @@ class IDXDownloader:
         except Exception as e:
             print(f"    ✗ Batch sync failed: {e}")
 
+    def cleanup_siblings(self):
+        """After batch download, keep only largest PDF per (date, ticker) group.
+        
+        The IDX disclosure page often lists multiple attachment entries for the same
+        disclosure. The first is usually a 5-9KB stub/cover page; later entries contain
+        the actual scanned document. This method keeps only the largest file per
+        (date, ticker) group — matching the monitor's dedup logic.
+        """
+        deleted = 0
+        kept = 0
+        groups = {}
+        
+        r = subprocess.run(
+            f"ls '{self.download_folder}' | grep -iP '^\\d{{8}}_[A-Z]+_' | grep -i '\\.pdf$'",
+            shell=True, capture_output=True, text=True, timeout=30
+        )
+        if not r.stdout.strip():
+            return
+            
+        for fname in r.stdout.strip().split('\n'):
+            fname = fname.strip()
+            if not fname:
+                continue
+            m = re.match(r'(\d{8})_([A-Z]+)_', fname.upper())
+            if not m:
+                continue
+            key = (m.group(1), m.group(2))
+            groups.setdefault(key, []).append(fname)
+        
+        for key, siblings in groups.items():
+            if len(siblings) <= 1:
+                kept += 1
+                continue
+            with_path = [(s, os.path.getsize(os.path.join(self.download_folder, s))) for s in siblings]
+            best = max(with_path, key=lambda x: x[1])
+            for fname, _ in with_path:
+                if fname != best[0]:
+                    os.remove(os.path.join(self.download_folder, fname))
+                    deleted += 1
+                else:
+                    kept += 1
+        
+        if deleted:
+            print(f"  → Cleaned up {deleted} sibling files, kept {kept} best PDF(s)")
+
     def parse_date_string(self, date_str):
         """Safely parse Indonesian datetime string to Python datetime object"""
         date_str = date_str.strip()
@@ -425,8 +470,8 @@ class IDXDownloader:
                                 priority = "High"
                                 break
                         
-                        # 3. Attachments
-                        attachment_links = record.find_elements(By.XPATH, ".//a[contains(@href, '.pdf') or contains(@href, '.zip') or contains(@href, '.xls') or contains(@href, 'download')]")
+                        # 3. Attachments (PDF only)
+                        attachment_links = record.find_elements(By.XPATH, ".//a[contains(@href, \'.pdf\')]")
                         
                         for link in attachment_links:
                             url = link.get_attribute("href")
@@ -501,6 +546,9 @@ class IDXDownloader:
                     page_num += 1
 
             print(f"\n✓ Session complete. Downloaded {total_downloaded} new files.")
+            
+            # Clean up sibling bloat before syncing — keep only largest per (date, ticker)
+            self.cleanup_siblings()
             
             # Batch sync to GDrive
             if total_downloaded > 0:
